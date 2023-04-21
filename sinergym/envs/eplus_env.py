@@ -167,7 +167,9 @@ class EplusEnv(gym.Env):
         # Change to next episode
         _, obs, _ = self.simulator.reset(self.weather_variability)
 
-        return np.array(obs, dtype=np.float32)
+        self.obs_dict = dict(zip(self.variables['observation'], obs))
+
+        return self.obs_dict
 
     # ---------------------------------------------------------------------------- #
     #                                     STEP                                     #
@@ -218,7 +220,7 @@ class EplusEnv(gym.Env):
             'out_temperature': self.obs_dict['Site Outdoor Air Drybulb Temperature(Environment)'],
             'action_': action_}
 
-        return np.array(obs, dtype=np.float32), reward, done, info
+        return self.obs_dict, reward, done, info
 
     # ---------------------------------------------------------------------------- #
     #                                RENDER (empty)                                #
