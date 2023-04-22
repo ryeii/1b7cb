@@ -77,7 +77,8 @@ def dynamics(model, standardization, x, u, t):
 
     # convert env_state to standardized form
     for variable in range(5):
-        env_state[variable] = (env_state[variable] - standardization[env_state_name[variable]]['mean']) / standardization[env_state_name[variable]]['std']
+        if standardization[env_state_name[variable]]['std'] != 0:
+            env_state[variable] = (env_state[variable] - standardization[env_state_name[variable]]['mean']) / standardization[env_state_name[variable]]['std']
 
 
     '''
@@ -169,7 +170,10 @@ def fit(data_buffer):
     standardization = {}
     for col in data.columns:
         standardization[col] = {'mean': data[col].mean(), 'std': data[col].std()}
-        data[col] = (data[col] - data[col].mean()) / data[col].std()
+        if data[col].std() != 0:
+            data[col] = (data[col] - data[col].mean()) / data[col].std()
+        else:
+            data[col] = 0
 
     X = data
     Y = data['zone temperature'].shift(-1) # shift the zone temperature column up by 1 row
@@ -178,8 +182,15 @@ def fit(data_buffer):
     X = X.drop(X.index[-1])
     Y = Y.drop(Y.index[-1])
 
+    # X and Y to numpy arrays type float32
+    X = X.to_numpy(dtype=np.float32)
+    Y = Y.to_numpy(dtype=np.float32)
+
     # nan to 0
-    X = np.nan_to_num(X)
+    for i in range(len(X)):
+        for j in range(len(X[i])):
+            if np.isnan(X[i][j]):
+                X[i][j] = 0.0
     Y = np.nan_to_num(Y)
 
     # tensorize X and Y
@@ -303,18 +314,21 @@ while not done:
     obs, reward, done, info = env.step(a)
     rewards.append(reward)
 
-    # add entry to data buffer
-    data_buffer = data_buffer.append({'zone temperature': obs['Zone Air Temperature(SPACE1-1)'],
+    # add entry to data buffer using pd.concat
+    data_buffer = pd.concat([data_buffer, pd.DataFrame({'zone temperature': obs['Zone Air Temperature(SPACE1-1)'],
                                         'Site Outdoor Air Drybulb Temperature(Environment)': obs['Site Outdoor Air Drybulb Temperature(Environment)'],
                                         'Site Outdoor Air Relative Humidity(Environment)': obs['Site Outdoor Air Relative Humidity(Environment)'],
                                         'Site Wind Speed(Environment)': obs['Site Wind Speed(Environment)'],
                                         'Site Total Solar Radiation Rate per Area(Environment)': obs['Site Diffuse Solar Radiation Rate per Area(Environment)']+obs['Site Direct Solar Radiation Rate per Area(Environment)'],
                                         'Zone People Occupant Count(SPACE1-1)': obs['Zone People Occupant Count(SPACE1-1)'],
-                                        'control signal': a}, ignore_index=True)
+                                        'control signal': a}, index=[0])], ignore_index=True)
     
     mppi.update_data_buffer(data_buffer)
 
     current_timestep += 1
+
+    if current_timestep % 100 == 0:
+        print('timestep: ', current_timestep)
 
 env.close()
 
@@ -325,3 +339,16 @@ print(
     np.mean(rewards),
     'Cumulative reward: ',
     sum(rewards))
+
+# plot the reward, x-axis is the timestep and y-axis is the reward
+import matplotlib.pyplot as plt
+
+plt.plot(rewards)
+plt.xlabel('timestep')
+plt.ylabel('reward')
+plt.show()
+plt.savefig('zimages/reward.png')
+
+# turn reward into a pandas dataframe and save it to a csv file
+reward_df = pd.DataFrame(rewards, columns=['reward'])
+reward_df.to_csv('zimages/reward.csv')
