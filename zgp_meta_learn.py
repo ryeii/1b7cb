@@ -61,7 +61,7 @@ losses = []
 lengthscale = []
 scale = []
 noise = []
-training_iter = 200
+training_iter = 150
 for i in range(training_iter):
     # Zero gradients from previous iteration
     optimizer.zero_grad()
@@ -81,28 +81,16 @@ for i in range(training_iter):
     noise.append(model.likelihood.noise.item())
     optimizer.step()
 
-# plot the loss curve
+# plot
 import matplotlib.pyplot as plt
 plt.plot(losses)
-plt.title('loss')
-plt.show()
-plt.savefig('zimages/loss.png')
-
-# plot the lengthscale curve
 plt.plot(lengthscale)
-plt.title('lengthscale l')
-plt.show()
-plt.savefig('zimages/lengthscale.png')
-
-# plot the scale curve
 plt.plot(scale)
-plt.title('scale sigma')
-plt.show()
-plt.savefig('zimages/scale.png')
-
-# plot the noise curve
 plt.plot(noise)
-plt.title('noise sigma_epsilon')
-plt.show()
-plt.savefig('zimages/noise.png')
+plt.legend(['loss', 'lengthscale l', 'outputscale sigma', 'noise sigma_epsilon'])
+plt.savefig('losses.png')
+
+print('Final lengthscale: %.3f' % model.covar_module.base_kernel.lengthscale.item())
+print('Final outputscale: %.3f' % model.covar_module.outputscale.item())
+print('Final noise: %.3f' % model.likelihood.noise.item())
 

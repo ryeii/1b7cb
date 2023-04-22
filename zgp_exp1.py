@@ -169,7 +169,15 @@ class GPModel(gpytorch.models.ExactGP):
         covar_x = self.covar_module(x)
         return gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
 
+likelihood = gpytorch.likelihoods.GaussianLikelihood()
+model = GPModel(train_x, train_y, likelihood)
 
+model.covar_module.base_kernel.lengthscale = 0.836
+model.covar_module.outputscale = 0.652
+model.likelihood.noise = 0.010
+
+model.eval()
+likelihood.eval()
 
 
 import gym
