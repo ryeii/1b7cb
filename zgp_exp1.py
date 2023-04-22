@@ -31,7 +31,7 @@ def env_reader(timestep):
     Returns:
     - env_state (numpy array): the environment state at the given timestep, shape (1,)
     '''
-    return WEATHER.iloc[timestep, 1:].values
+    return WEATHER.iloc[timestep].values.tolist()
 
 
 def get_confidence_value(var):
@@ -76,38 +76,61 @@ def dynamics(model, standardization, x, u, t):
     for variable in range(5):
         env_state[variable] = (env_state[variable] - standardization[env_state_name[variable]]['mean']) / standardization[env_state_name[variable]]['std']
 
-    x = np.concatenate((x, env_state)) # concatenate the zone state and environment state
-    x = np.concatenate((x, np.array([u]))) # concatenate state and the control signal
 
-    pred = model(x, u)
+    '''
+    sometimes all values in the buffer for this variable are zeros, which will cause the std to be zero and standardized form to be nan due to division by zero.
+    In this case, we set the standardized form to be 0.
+    '''
+    # replace nan in env_state with 0
+    env_state = np.nan_to_num(env_state)
+
+    x = [x, env_state[0], env_state[1], env_state[2], env_state[3], env_state[4], u]
+    x = np.array(x)
+
+    # tensorize x
+    x = torch.tensor(x, dtype=torch.float32)
+
+    # reshape x so it has size 7 in dimension 0
+    x = x.reshape(1, 7)
+
+    print('x: ', x)
+
+    pred = model(x)
 
     mu = pred.mean
     var = pred.variance
+
+    # convert mu and var from tensor to numpy float
+    mu = mu.detach().numpy().item()
+    var = var.detach().numpy().item()
 
     # convert mu back to original form
     mu = mu * standardization['zone temperature']['std'] + standardization['zone temperature']['mean']
 
     return mu, var
 
-def cost(x, var, u):
+def cost(x, var, u, t):
     '''
     Compute the cost of the given state and control signal.
 
     Args:
-    - x (numpy array): zone state + environment state, shape (state_dim,)
+    - x (float): zone state (zone temperature), shape (state_dim,
     - sigma (float): standard deviation of the Gaussian Process prediction
     - u (float): the control signal, shape (control_dim,)
 
     Returns:
     - c (float): the cost of the given state and control signal
     '''
+    env_state = env_reader(t)
+
     comfort_range = COMFORT_RANGE
     weight_energy = 1
-    if x[5] > 0:
+
+    if env_state[4] > 0:
         weight_energy = 0.1
 
-    comfort_cost = -(1 - weight_energy) * (abs(x[0] - comfort_range[0]) + abs(x[0] - comfort_range[1]))
-    energy_cost = weight_energy * (u - x[0])**2
+    comfort_cost = -(1 - weight_energy) * (abs(x - comfort_range[0]) + abs(x - comfort_range[1]))
+    energy_cost = weight_energy * (u - x)**2
 
     confidence = get_confidence_value(var)
 
@@ -154,9 +177,13 @@ def fit(data_buffer):
     X = X.drop(X.index[-1])
     Y = Y.drop(Y.index[-1])
 
+    # nan to 0
+    X = np.nan_to_num(X)
+    Y = np.nan_to_num(Y)
+
     # tensorize X and Y
-    X = torch.tensor(X.values, dtype=torch.float32)
-    Y = torch.tensor(Y.values, dtype=torch.float32)
+    X = torch.tensor(X, dtype=torch.float32)
+    Y = torch.tensor(Y, dtype=torch.float32)
 
     likelihood = gpytorch.likelihoods.GaussianLikelihood()
     model = GPModel(X, Y, likelihood)
@@ -192,8 +219,8 @@ class MPPIController:
         Returns:
         - u (numpy array): the control signal, shape (control_dim,)
         """
-        # if the data buffer is not empty, fit a Gaussian Process model to the data buffer
-        if not self.data_buffer.empty:
+        # if the length of the data buffer is larger than 2, fit a Gaussian Process model to the data buffer
+        if len(self.data_buffer) > 2:
             model, likelihood, standardization = fit(self.data_buffer)
         else:
             return np.random.randint(0, 10) # return random int from 0 to 9
@@ -213,7 +240,7 @@ class MPPIController:
                 u = U[j] + s[j]
                 x, var = self.dynamics_fn(model, standardization, x, u, self.time_offset + t) # pass t so it can call env_reader to get weather
                 S[i, j] = x
-                C[i] += self.cost_fn(x, var, u) # occupancy is obtained from the state, so we don't need to pass t
+                C[i] += self.cost_fn(x, var, u, self.time_offset + t) # occupancy is obtained from the env state read from weather file, so we don't need to pass t
         
         expC = np.exp(-self.lambda_ * C)
         expC /= np.sum(expC)
