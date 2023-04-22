@@ -60,6 +60,9 @@ def dynamics(model, standardization, x, u, t):
     - mu (float): the mean of the Gaussian Process prediction
     - var (float): the variance of the Gaussian Process prediction
     '''
+    # u is a float from 0 to 1, so we need to convert it to an int from 0 to 9
+    u = int(u * 9)
+
     # convert x and u to standardized form
     x = (x - standardization['zone temperature']['mean']) / standardization['zone temperature']['std']
     u = (u - standardization['control signal']['mean']) / standardization['control signal']['std']
@@ -92,8 +95,6 @@ def dynamics(model, standardization, x, u, t):
 
     # reshape x so it has size 7 in dimension 0
     x = x.reshape(1, 7)
-
-    print('x: ', x)
 
     pred = model(x)
 
@@ -228,6 +229,7 @@ class MPPIController:
         S = np.zeros((self.num_samples, self.horizon)) # sample trajectories
         C = np.zeros((self.num_samples,)) # trajectory costs
         U = np.zeros((self.horizon,)) # control signal
+        U_noise = np.zeros((self.num_samples, self.horizon)) # noise added to U
 
         # populate U with random signals from 0 to 1
         for j in range(self.horizon):
@@ -236,19 +238,28 @@ class MPPIController:
         for i in range(self.num_samples):
             x = np.copy(x0)
             s = np.random.normal(0, self.sigma, (self.horizon,)) # sample noise
+            U_noise[i] = s
             for j in range(self.horizon):
                 u = U[j] + s[j]
                 x, var = self.dynamics_fn(model, standardization, x, u, self.time_offset + t) # pass t so it can call env_reader to get weather
                 S[i, j] = x
                 C[i] += self.cost_fn(x, var, u, self.time_offset + t) # occupancy is obtained from the env state read from weather file, so we don't need to pass t
         
+        # downscale C by 1000 to avoid float underflow
+        C /= 10000
+
         expC = np.exp(-self.lambda_ * C)
+
         expC /= np.sum(expC)
         
         for j in range(self.horizon):
-            U[j] = np.sum(expC * S[:, j])
+            U[j] += np.sum(expC * U_noise[:, j])
+
+        u = U[0]
+        # u is a float from 0 to 1, so we need to convert it to an int from 0 to 9
+        u = int(u * 9)
         
-        return U
+        return u
     
     def update_data_buffer(self, data_buffer):
         self.data_buffer = data_buffer
@@ -284,7 +295,7 @@ obs = env.reset()
 rewards = []
 done = False
 current_timestep = 0
-mppi = MPPIController(num_samples=100, horizon=4, time_offset=0, dynamics_fn=dynamics, cost_fn=cost, data_buffer=data_buffer, lambda_=1.0, sigma=1.0)
+mppi = MPPIController(num_samples=100, horizon=4, time_offset=0, dynamics_fn=dynamics, cost_fn=cost, data_buffer=data_buffer, lambda_=1.0, sigma=0.2)
 
 while not done:
 
