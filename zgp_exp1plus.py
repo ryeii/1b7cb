@@ -307,7 +307,7 @@ obs = env.reset()
 rewards = []
 done = False
 current_timestep = 0
-mppi = MPPIController(num_samples=100, horizon=4, time_offset=0, dynamics_fn=dynamics, cost_fn=cost, data_buffer=data_buffer, lambda_=1.0, sigma=0.2)
+mppi = MPPIController(num_samples=200, horizon=8, time_offset=0, dynamics_fn=dynamics, cost_fn=cost, data_buffer=data_buffer, lambda_=1.0, sigma=0.2)
 
 start_time = datetime.datetime.now()
 
@@ -354,8 +354,8 @@ plt.plot(rewards)
 plt.xlabel('timestep')
 plt.ylabel('reward')
 plt.show()
-plt.savefig('zimages/reward.png')
+plt.savefig('zimages/reward_plus.png')
 
 # turn reward into a pandas dataframe and save it to a csv file
 reward_df = pd.DataFrame(rewards, columns=['reward'])
-reward_df.to_csv('zimages/reward.csv')
+reward_df.to_csv('zimages/reward_plus.csv')
