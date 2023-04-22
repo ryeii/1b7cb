@@ -19,8 +19,6 @@ COMFORT_RANGE = (23, 26)
 WEATHER = pd.read_csv('weather_pittsburg_Jun1Sept1.csv')
 LAMBDA_CONFIDENCE = 1.0
 
-model = 0 #TODO load model
-
 
 def env_reader(timestep):
     '''
@@ -49,7 +47,7 @@ def get_confidence_value(var):
     return 0.5 * np.log(2 * np.pi * var) + 0.5 # information entropy of Gaussian is 1/2 * log(2*pi*var) + 1/2
 
 
-def dynamics(x, u, t):
+def dynamics(model, standardization, x, u, t):
     '''
     Predict the next zone temperature given the current state, control signal, and time.
 
@@ -62,9 +60,22 @@ def dynamics(x, u, t):
     - mu (float): the mean of the Gaussian Process prediction
     - var (float): the variance of the Gaussian Process prediction
     '''
-    model.eval()
+    # convert x and u to standardized form
+    x = (x - standardization['zone temperature']['mean']) / standardization['zone temperature']['std']
+    u = (u - standardization['control signal']['mean']) / standardization['control signal']['std']
 
     env_state = env_reader(t)
+
+    env_state_name = ['Site Outdoor Air Drybulb Temperature(Environment)',
+                    'Site Outdoor Air Relative Humidity(Environment)',
+                    'Site Wind Speed(Environment)',
+                    'Site Total Solar Radiation Rate per Area(Environment)',
+                    'Zone People Occupant Count(SPACE1-1)',]
+
+    # convert env_state to standardized form
+    for variable in range(5):
+        env_state[variable] = (env_state[variable] - standardization[env_state_name[variable]]['mean']) / standardization[env_state_name[variable]]['std']
+
     x = np.concatenate((x, env_state)) # concatenate the zone state and environment state
     x = np.concatenate((x, np.array([u]))) # concatenate state and the control signal
 
@@ -72,6 +83,9 @@ def dynamics(x, u, t):
 
     mu = pred.mean
     var = pred.variance
+
+    # convert mu back to original form
+    mu = mu * standardization['zone temperature']['std'] + standardization['zone temperature']['mean']
 
     return mu, var
 
@@ -99,13 +113,71 @@ def cost(x, var, u):
 
     return comfort_cost + energy_cost - LAMBDA_CONFIDENCE * confidence
 
+import gpytorch
+import torch
+
+class GPModel(gpytorch.models.ExactGP):
+    def __init__(self, train_x, train_y, likelihood):
+        super(GPModel, self).__init__(train_x, train_y, likelihood)
+        self.mean_module = gpytorch.means.ConstantMean()
+        self.covar_module = gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel())
+
+    def forward(self, x):
+        mean_x = self.mean_module(x)
+        covar_x = self.covar_module(x)
+        return gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
+    
+
+def fit(data_buffer):
+    '''
+    Args:
+    - data_buffer (pandas DataFrame): the data buffer
+
+    Returns:
+    - model (GPModel): the trained Gaussian Process model
+    - likelihood (gpytorch.likelihoods): the likelihood of the Gaussian Process model
+    - standardization (dict): the mean and standard deviation of each column in the data buffer
+    '''
+
+    data = data_buffer.copy()
+
+    # for each column, calculate and record the mean and standard deviation, then normalize the data
+    standardization = {}
+    for col in data.columns:
+        standardization[col] = {'mean': data[col].mean(), 'std': data[col].std()}
+        data[col] = (data[col] - data[col].mean()) / data[col].std()
+
+    X = data
+    Y = data['zone temperature'].shift(-1) # shift the zone temperature column up by 1 row
+
+    # drop the last row of X and Y, since the last row of X has no corresponding Y
+    X = X.drop(X.index[-1])
+    Y = Y.drop(Y.index[-1])
+
+    # tensorize X and Y
+    X = torch.tensor(X.values, dtype=torch.float32)
+    Y = torch.tensor(Y.values, dtype=torch.float32)
+
+    likelihood = gpytorch.likelihoods.GaussianLikelihood()
+    model = GPModel(X, Y, likelihood)
+
+    model.covar_module.base_kernel.lengthscale = 0.836
+    model.covar_module.outputscale = 0.652
+    model.likelihood.noise = 0.010
+
+    model.eval()
+    likelihood.eval()
+
+    return model, likelihood, standardization
+
 class MPPIController:
-    def __init__(self, num_samples, horizon, time_offset, dynamics_fn, cost_fn, lambda_=1.0, sigma=1.0):
+    def __init__(self, num_samples, horizon, time_offset, dynamics_fn, cost_fn, data_buffer, lambda_=1.0, sigma=1.0):
         self.num_samples = num_samples
         self.horizon = horizon
         self.time_offset = time_offset
         self.dynamics_fn = dynamics_fn
         self.cost_fn = cost_fn
+        self.data_buffer = data_buffer
         self.lambda_ = lambda_
         self.sigma = sigma
         
@@ -120,6 +192,12 @@ class MPPIController:
         Returns:
         - u (numpy array): the control signal, shape (control_dim,)
         """
+        # if the data buffer is not empty, fit a Gaussian Process model to the data buffer
+        if not self.data_buffer.empty:
+            model, likelihood, standardization = fit(self.data_buffer)
+        else:
+            return np.random.randint(0, 10) # return random int from 0 to 9
+
         S = np.zeros((self.num_samples, self.horizon)) # sample trajectories
         C = np.zeros((self.num_samples,)) # trajectory costs
         U = np.zeros((self.horizon,)) # control signal
@@ -133,7 +211,7 @@ class MPPIController:
             s = np.random.normal(0, self.sigma, (self.horizon,)) # sample noise
             for j in range(self.horizon):
                 u = U[j] + s[j]
-                x, var = self.dynamics_fn(x, u, self.time_offset + t) # pass t so it can call env_reader to get weather
+                x, var = self.dynamics_fn(model, standardization, x, u, self.time_offset + t) # pass t so it can call env_reader to get weather
                 S[i, j] = x
                 C[i] += self.cost_fn(x, var, u) # occupancy is obtained from the state, so we don't need to pass t
         
@@ -144,6 +222,10 @@ class MPPIController:
             U[j] = np.sum(expC * S[:, j])
         
         return U
+    
+    def update_data_buffer(self, data_buffer):
+        self.data_buffer = data_buffer
+        return
 
 
 
@@ -154,30 +236,6 @@ data_buffer = pd.DataFrame(columns=['zone temperature',
                                     'Site Total Solar Radiation Rate per Area(Environment)',
                                     'Zone People Occupant Count(SPACE1-1)',
                                     'control signal',])
-
-
-import gpytorch
-
-class GPModel(gpytorch.models.ExactGP):
-    def __init__(self, train_x, train_y, likelihood):
-        super(GPModel, self).__init__(train_x, train_y, likelihood)
-        self.mean_module = gpytorch.means.ConstantMean()
-        self.covar_module = gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel())
-
-    def forward(self, x):
-        mean_x = self.mean_module(x)
-        covar_x = self.covar_module(x)
-        return gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
-
-likelihood = gpytorch.likelihoods.GaussianLikelihood()
-model = GPModel(train_x, train_y, likelihood)
-
-model.covar_module.base_kernel.lengthscale = 0.836
-model.covar_module.outputscale = 0.652
-model.likelihood.noise = 0.010
-
-model.eval()
-likelihood.eval()
 
 
 import gym
@@ -195,24 +253,37 @@ env = gym.make('Eplus-demo-v1',
                weather_file=weather_file,
                config_params=extra_conf,)
 
-for i in range(1):
-    obs = env.reset()
-    rewards = []
-    done = False
-    current_month = 0
-    while not done:
+obs = env.reset()
+rewards = []
+done = False
+current_timestep = 0
+mppi = MPPIController(num_samples=100, horizon=4, time_offset=0, dynamics_fn=dynamics, cost_fn=cost, data_buffer=data_buffer, lambda_=1.0, sigma=1.0)
 
-        a = env.action_space.sample()
-        obs, reward, done, info = env.step(a)
-        rewards.append(reward)
-        if info['month'] != current_month:  # display results every month
-            current_month = info['month']
-            print('Reward: ', sum(rewards), info)
-    print(
-        'Episode ',
-        i,
-        'Mean reward: ',
-        np.mean(rewards),
-        'Cumulative reward: ',
-        sum(rewards))
+while not done:
+
+    a = mppi.control(obs['Zone Air Temperature(SPACE1-1)'], current_timestep)
+    obs, reward, done, info = env.step(a)
+    rewards.append(reward)
+
+    # add entry to data buffer
+    data_buffer = data_buffer.append({'zone temperature': obs['Zone Air Temperature(SPACE1-1)'],
+                                        'Site Outdoor Air Drybulb Temperature(Environment)': obs['Site Outdoor Air Drybulb Temperature(Environment)'],
+                                        'Site Outdoor Air Relative Humidity(Environment)': obs['Site Outdoor Air Relative Humidity(Environment)'],
+                                        'Site Wind Speed(Environment)': obs['Site Wind Speed(Environment)'],
+                                        'Site Total Solar Radiation Rate per Area(Environment)': obs['Site Diffuse Solar Radiation Rate per Area(Environment)']+obs['Site Direct Solar Radiation Rate per Area(Environment)'],
+                                        'Zone People Occupant Count(SPACE1-1)': obs['Zone People Occupant Count(SPACE1-1)'],
+                                        'control signal': a}, ignore_index=True)
+    
+    mppi.update_data_buffer(data_buffer)
+
+    current_timestep += 1
+
 env.close()
+
+print(
+    'Episode ',
+    i,
+    'Mean reward: ',
+    np.mean(rewards),
+    'Cumulative reward: ',
+    sum(rewards))
