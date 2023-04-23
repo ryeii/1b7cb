@@ -89,7 +89,7 @@ def reward_(obs):
     comfort_cost = (1 - weight_energy) * (abs(x - comfort_range[0]) + abs(x - comfort_range[1]))
     energy_cost = weight_energy * obs['Facility Total HVAC Electricity Demand Rate(Whole Building)'] / 100
 
-    return - comfort_cost - energy_cost
+    return - comfort_cost, - energy_cost
 
 # create rule-based controller
 agent = MyRuleBasedController(env)
@@ -102,7 +102,8 @@ for i in range(1):
 while not done:
     action = agent.act(obs)
     obs, reward, done, info = env.step(action)
-    rewards.append(reward_(obs))
+    comfort_reward, energy_reward = reward_(obs)
+    rewards.append([comfort_reward, energy_reward])
     if info['month'] != current_month:  # display results every month
         current_month = info['month']
         print('Reward: ', sum(rewards), info)
@@ -118,7 +119,7 @@ env.close()
 
 import pandas as pd
 # print the sum of rewards of first 2000 time steps
-print(sum(rewards[:2000]))
+print(sum(rewards[2000]))
 
 # read zimages/reward_plus.csv
 reward_plus = pd.read_csv('zimages/reward_plus.csv', index_col=0)

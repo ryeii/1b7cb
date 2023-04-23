@@ -330,7 +330,7 @@ def reward_(obs):
     comfort_cost = (1 - weight_energy) * (abs(x - comfort_range[0]) + abs(x - comfort_range[1]))
     energy_cost = weight_energy * obs['Facility Total HVAC Electricity Demand Rate(Whole Building)'] / 100
 
-    return - comfort_cost - energy_cost
+    return - comfort_cost, - energy_cost
 
 extra_conf={
     'timesteps_per_hour':4, 
@@ -356,7 +356,8 @@ while not done:
     a = mppi.control(obs['Zone Air Temperature(SPACE1-1)'], current_timestep)
 
     obs, reward, done, info = env.step(a)
-    rewards.append(reward_(obs))
+    comfort_reward, energy_reward = reward_(obs)
+    rewards.append([comfort_reward, energy_reward])
 
     # add entry to data buffer using pd.concat
     data_buffer = pd.concat([data_buffer, pd.DataFrame({'zone temperature': obs['Zone Air Temperature(SPACE1-1)'],
@@ -379,19 +380,11 @@ while not done:
         print('timestep: ', current_timestep, '. time elapsed: ', checkpoint_time - start_time, '. predicted remaining time: ', predicted_remaining_time_minutes, ' minutes')
 
         # turn reward into a pandas dataframe and save it to a csv file
-        reward_df = pd.DataFrame(rewards, columns=['reward'])
+        reward_df = pd.DataFrame(rewards, columns=['comfort reward', 'energy reward'])
         reward_df.to_csv('zimages/reward_plus.csv')
         print('reward saved!')
 
 env.close()
-
-print(
-    'Episode ',
-    i,
-    'Mean reward: ',
-    np.mean(rewards),
-    'Cumulative reward: ',
-    sum(rewards))
 
 # plot the reward, x-axis is the timestep and y-axis is the reward
 import matplotlib.pyplot as plt
