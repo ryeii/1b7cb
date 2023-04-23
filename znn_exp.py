@@ -36,19 +36,6 @@ def env_reader(timestep):
     return WEATHER.iloc[timestep].values.tolist()
 
 
-def get_confidence_value(var):
-    '''
-    Return the confidence value given the variance.
-
-    Args:
-    - var (float): the variance of the Gaussian Process prediction
-
-    Returns:
-    - confidence_value (float): the confidence value
-    '''
-    return 0.5 * np.log(2 * np.pi * var) + 0.5 # information entropy of Gaussian is 1/2 * log(2*pi*var) + 1/2
-
-
 def dynamics(model, standardization, x, u, t):
     '''
     Predict the next zone temperature given the current state, control signal, and time.
@@ -108,19 +95,14 @@ def dynamics(model, standardization, x, u, t):
 
     pred = model(x)
 
-    mu = pred.mean
-    var = pred.variance
-
-    # convert mu and var from tensor to numpy arrays
-    mu = mu.detach().numpy()
-    var = var.detach().numpy()
+    pred = pred.detach().numpy()
 
     # convert mu back to original form
-    mu = mu * standardization['zone temperature']['std'] + standardization['zone temperature']['mean']
+    pred = pred * standardization['zone temperature']['std'] + standardization['zone temperature']['mean']
 
-    return mu, var
+    return pred
 
-def cost(x, var, u, t):
+def cost(x, u, t):
     '''
     Compute the cost of the given state and control signal.
 
@@ -143,23 +125,23 @@ def cost(x, var, u, t):
     comfort_cost = (1 - weight_energy) * (abs(x - comfort_range[0]) + abs(x - comfort_range[1]))
     energy_cost = weight_energy * (u - x)**2
 
-    confidence = get_confidence_value(var)
+    return comfort_cost + energy_cost
 
-    return comfort_cost + energy_cost - LAMBDA_CONFIDENCE * confidence
-
-import gpytorch
 import torch
 
-class GPModel(gpytorch.models.ExactGP):
-    def __init__(self, train_x, train_y, likelihood):
-        super(GPModel, self).__init__(train_x, train_y, likelihood)
-        self.mean_module = gpytorch.means.ConstantMean()
-        self.covar_module = gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel())
+'''define neural network'''
+class NN(torch.nn.Module):
+    def __init__(self, input_dim, output_dim, hidden_dim):
+        super(NN, self).__init__()
+        self.linear1 = torch.nn.Linear(input_dim, hidden_dim)
+        self.linear2 = torch.nn.Linear(hidden_dim, hidden_dim)
+        self.linear3 = torch.nn.Linear(hidden_dim, output_dim)
 
     def forward(self, x):
-        mean_x = self.mean_module(x)
-        covar_x = self.covar_module(x)
-        return gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
+        x = torch.nn.functional.silu(self.linear1(x))
+        x = torch.nn.functional.silu(self.linear2(x))
+        x = self.linear3(x)
+        return x
     
 
 def fit(data_buffer):
@@ -248,7 +230,6 @@ class MPPIController:
             return np.random.randint(0, 10) # return random int from 0 to 9
 
         S = np.zeros((self.num_samples, self.horizon)) # sample trajectories
-        V = np.zeros((self.num_samples, self.horizon)) # confidence trajectories
         C = np.zeros((self.num_samples,)) # trajectory costs
         U = np.zeros((self.horizon,)) # control signal
         U_noise = np.zeros((self.num_samples, self.horizon)) # noise added to U
@@ -263,13 +244,12 @@ class MPPIController:
             s = np.random.normal(0, self.sigma, (self.num_samples,)) # sample noise
             U_noise[:, t] = s
             u = s + U[t] # get a vector of control signals by adding noise vector to initial U
-            x, var = self.dynamics_fn(model, standardization, x, u, self.time_offset + t) # pass t so it can call env_reader to get weather
+            x = self.dynamics_fn(model, standardization, x, u, self.time_offset + t) # pass t so it can call env_reader to get weather
             S[:, t] = x
-            V[:, t] = var
         
         for i in range(self.num_samples):
             for j in range(self.horizon):
-                C[i] += self.cost_fn(S[i, j], V[i, j], U[j], self.time_offset + j)
+                C[i] += self.cost_fn(S[i, j], U[j], self.time_offset + j)
         
         # for i in range(self.num_samples):
         #     x = np.copy(x0)

@@ -36,16 +36,6 @@ for i in range(1):
 
         a = env.action_space.sample()
 
-        # add entry to data buffer
-        data_buffer = data_buffer.append({'zone temperature': obs['Zone Air Temperature(SPACE1-1)'],
-                                            'Site Outdoor Air Drybulb Temperature(Environment)': obs['Site Outdoor Air Drybulb Temperature(Environment)'],
-                                            'Site Outdoor Air Relative Humidity(Environment)': obs['Site Outdoor Air Relative Humidity(Environment)'],
-                                            'Site Wind Speed(Environment)': obs['Site Wind Speed(Environment)'],
-                                            'Site Total Solar Radiation Rate per Area(Environment)': obs['Site Diffuse Solar Radiation Rate per Area(Environment)']+obs['Site Direct Solar Radiation Rate per Area(Environment)'],
-                                            'Zone People Occupant Count(SPACE1-1)': obs['Zone People Occupant Count(SPACE1-1)'],
-                                            'control signal': a}, ignore_index=True)
-
-
         obs, reward, done, info = env.step(a)
         rewards.append(reward)
         if info['month'] != current_month:  # display results every month
@@ -63,4 +53,13 @@ env.close()
 # print(weather)
 
 # save data buffer to csv
-data_buffer.to_csv('wdata_buffer_pittsburg_Jun1Sept1_random_action.csv')
+# data_buffer.to_csv('wdata_buffer_pittsburg_Jun1Sept1_random_action.csv')
+
+# print the sum of rewards of first 2000 time steps
+print(sum(rewards[:2000]))
+
+# read zimages/reward_plus.csv
+reward_plus = pd.read_csv('zimages/reward_plus.csv', index_col=0)
+
+# print the sum of rewards of first 2000 time steps
+print(sum(reward_plus['reward'][:2000]))
