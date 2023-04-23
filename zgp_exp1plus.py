@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import datetime
 
 '''
 Convention:
@@ -52,8 +53,8 @@ def dynamics(model, standardization, x, u, t):
     Predict the next zone temperature given the current state, control signal, and time.
 
     Args:
-    - x (float): zone state (zone temperature), shape (state_dim,)
-    - u (float): the control signal, shape (control_dim,)
+    - x (ndarray): a vector of zone states (zone temperature), shape (state_dim,)
+    - u (ndarray): a vector of perturbated control signals, shape (control_dim,)
     - t (float): the current time
 
     Returns:
@@ -61,7 +62,8 @@ def dynamics(model, standardization, x, u, t):
     - var (float): the variance of the Gaussian Process prediction
     '''
     # u is a float from 0 to 1, so we need to convert it to an int from 0 to 9
-    u = int(u * 9)
+    for i in range(len(u)):
+        u[i] = int(u[i] * 9)
 
     # convert x and u to standardized form
     x = (x - standardization['zone temperature']['mean']) / standardization['zone temperature']['std']
@@ -88,23 +90,29 @@ def dynamics(model, standardization, x, u, t):
     # replace nan in env_state with 0
     env_state = np.nan_to_num(env_state)
 
-    x = [x, env_state[0], env_state[1], env_state[2], env_state[3], env_state[4], u]
-    x = np.array(x)
+    # make an array of x with shape (len(x), 7)
+    x_array = np.zeros((len(x), 7))
+
+    # replace each row in x_array with [x, env_state[0], env_state[1], env_state[2], env_state[3], env_state[4], u]. This is the input to the GP model.
+    for i in range(len(x)):
+        x_array[i] = [x[i], env_state[0], env_state[1], env_state[2], env_state[3], env_state[4], u[i]]
+
+    x = x_array
 
     # tensorize x
     x = torch.tensor(x, dtype=torch.float32)
 
     # reshape x so it has size 7 in dimension 0
-    x = x.reshape(1, 7)
+    x = x.reshape(len(x), 7)
 
     pred = model(x)
 
     mu = pred.mean
     var = pred.variance
 
-    # convert mu and var from tensor to numpy float
-    mu = mu.detach().numpy().item()
-    var = var.detach().numpy().item()
+    # convert mu and var from tensor to numpy arrays
+    mu = mu.detach().numpy()
+    var = var.detach().numpy()
 
     # convert mu back to original form
     mu = mu * standardization['zone temperature']['std'] + standardization['zone temperature']['mean']
@@ -232,12 +240,14 @@ class MPPIController:
         - u (numpy array): the control signal, shape (control_dim,)
         """
         # if the length of the data buffer is larger than 2, fit a Gaussian Process model to the data buffer
+
         if len(self.data_buffer) > 2:
             model, likelihood, standardization = fit(self.data_buffer)
         else:
             return np.random.randint(0, 10) # return random int from 0 to 9
 
         S = np.zeros((self.num_samples, self.horizon)) # sample trajectories
+        V = np.zeros((self.num_samples, self.horizon)) # confidence trajectories
         C = np.zeros((self.num_samples,)) # trajectory costs
         U = np.zeros((self.horizon,)) # control signal
         U_noise = np.zeros((self.num_samples, self.horizon)) # noise added to U
@@ -245,16 +255,32 @@ class MPPIController:
         # populate U with random signals from 0 to 1
         for j in range(self.horizon):
             U[j] = np.random.uniform(0, 1)
+
+        x = np.copy(x0)
+        x = np.array([x for i in range(self.num_samples)])
+        for t in range(self.horizon):
+            s = np.random.normal(0, self.sigma, (self.num_samples,)) # sample noise
+            U_noise[:, t] = s
+            u = s + U[t] # get a vector of control signals by adding noise vector to initial U
+            x, var = self.dynamics_fn(model, standardization, x, u, self.time_offset + t) # pass t so it can call env_reader to get weather
+            S[:, t] = x
+            V[:, t] = var
         
         for i in range(self.num_samples):
-            x = np.copy(x0)
-            s = np.random.normal(0, self.sigma, (self.horizon,)) # sample noise
-            U_noise[i] = s
             for j in range(self.horizon):
-                u = U[j] + s[j]
-                x, var = self.dynamics_fn(model, standardization, x, u, self.time_offset + t) # pass t so it can call env_reader to get weather
-                S[i, j] = x
-                C[i] += self.cost_fn(x, var, u, self.time_offset + t) # occupancy is obtained from the env state read from weather file, so we don't need to pass t
+                C[i] += self.cost_fn(S[i, j], V[i, j], U[j], self.time_offset + j)
+        
+        # for i in range(self.num_samples):
+        #     x = np.copy(x0)
+        #     s = np.random.normal(0, self.sigma, (self.horizon,)) # sample noise
+        #     U_noise[i] = s
+        #     for j in range(self.horizon):
+        #         u = U[j] + s[j]
+
+        #         x, var = self.dynamics_fn(model, standardization, x, u, self.time_offset + t) # pass t so it can call env_reader to get weather
+
+        #         S[i, j] = x
+        #         C[i] += self.cost_fn(x, var, u, self.time_offset + t) # occupancy is obtained from the env state read from weather file, so we don't need to pass t
         
         # downscale C by 1000 to avoid float underflow
         C /= 10000
@@ -290,7 +316,6 @@ data_buffer = pd.DataFrame(columns=['zone temperature',
 import gym
 import sinergym
 from sinergym.utils.wrappers import LoggerWrapper
-import datetime
 
 extra_conf={
     'timesteps_per_hour':4, 
@@ -307,13 +332,18 @@ obs = env.reset()
 rewards = []
 done = False
 current_timestep = 0
-mppi = MPPIController(num_samples=200, horizon=8, time_offset=0, dynamics_fn=dynamics, cost_fn=cost, data_buffer=data_buffer, lambda_=1.0, sigma=0.2)
+mppi = MPPIController(num_samples=100, horizon=4, time_offset=0, dynamics_fn=dynamics, cost_fn=cost, data_buffer=data_buffer, lambda_=1.0, sigma=0.2)
 
 start_time = datetime.datetime.now()
 
 while not done:
 
+    check1 = datetime.datetime.now()
+
     a = mppi.control(obs['Zone Air Temperature(SPACE1-1)'], current_timestep)
+
+    check2 = datetime.datetime.now()
+
     obs, reward, done, info = env.step(a)
     rewards.append(reward)
 
@@ -328,7 +358,11 @@ while not done:
     
     mppi.update_data_buffer(data_buffer)
 
+    check3 = datetime.datetime.now()
+
     current_timestep += 1
+
+    print('control time: ', check2 - check1, '. data buffer update time: ', check3 - check2)
 
     if current_timestep % 100 == 0:
         checkpoint_time = datetime.datetime.now()
