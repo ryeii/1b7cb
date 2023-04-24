@@ -104,25 +104,11 @@ while not done:
     obs, reward, done, info = env.step(action)
     comfort_reward, energy_reward = reward_(obs)
     rewards.append([comfort_reward, energy_reward])
-    if info['month'] != current_month:  # display results every month
-        current_month = info['month']
-        print('Reward: ', sum(rewards), info)
-print(
-    'Episode ',
-    i,
-    'Mean reward: ',
-    np.mean(rewards),
-    'Cumulative reward: ',
-    sum(rewards))
 
 env.close()
 
 import pandas as pd
-# print the sum of rewards of first 2000 time steps
-print(sum(rewards[2000]))
 
-# read zimages/reward_plus.csv
-reward_plus = pd.read_csv('zimages/reward_plus.csv', index_col=0)
-
-# print the sum of rewards of first 2000 time steps
-print(sum(reward_plus['reward'][:2000]))
+# make rewards a pandas dataframe and save to csv
+rewards = pd.DataFrame(rewards, columns=['comfort', 'energy'])
+rewards.to_csv('zimages/rewards_rulebased.csv')
