@@ -196,7 +196,7 @@ def cost(x, var, u, t):
     weight_energy = 1
 
     if env_state[4] > 0:
-        weight_energy = 0.001
+        weight_energy = 0.1
 
     comfort_cost = (1 - weight_energy) * (abs(x - comfort_range[0]) + abs(x - comfort_range[1]))
     energy_cost = weight_energy * (u - x)**2
@@ -490,7 +490,7 @@ while not done:
         print('timestep: ', current_timestep)
 
         # make data a pandas dataframe and save to csv
-        pd.DataFrame(data, columns=['comfort_reward', 'energy_reward', 'indoor_temp', 'action']).to_csv('zimages/data_gp_exp1.csv', index=False)
+        pd.DataFrame(data, columns=['comfort_reward', 'energy_reward', 'indoor_temp', 'action']).to_csv('zimages/data_gp_exp1.csv', index=True)
         print('data saved!')
     
     if current_timestep == 2001:

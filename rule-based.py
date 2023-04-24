@@ -113,4 +113,4 @@ import pandas as pd
 
 # make data a pandas dataframe and save to csv
 data = pd.DataFrame(data, columns=['comfort_reward', 'energy_reward', 'indoor_temp', 'action'])
-data.to_csv('zimages/data_rule_based.csv', index=False)
+data.to_csv('zimages/data_rule_based.csv', index=True)
