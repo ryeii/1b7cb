@@ -138,7 +138,7 @@ def cost(x, var, u, t):
     weight_energy = 1
 
     if env_state[4] > 0:
-        weight_energy = 0
+        weight_energy = 0.01
 
     comfort_cost = (1 - weight_energy) * (abs(x - comfort_range[0]) + abs(x - comfort_range[1]))
     energy_cost = weight_energy * (u - x)**2
@@ -212,6 +212,30 @@ def fit(data_buffer):
     model.covar_module.base_kernel.lengthscale = 0.836
     model.covar_module.outputscale = 0.652
     model.likelihood.noise = 0.010
+
+    model.train()
+    likelihood.train()
+
+    # Use the adam optimizer
+    optimizer = torch.optim.Adam([
+        {'params': model.parameters()},  # Includes GaussianLikelihood parameters
+    ], lr=0.1)
+
+    # "Loss" for GPs - the marginal log likelihood
+    mll = gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model)
+
+    training_iter = 10
+
+    for i in range(training_iter):
+        # Zero gradients from previous iteration
+        optimizer.zero_grad()
+        # Output from model
+        output = model(X)
+        # Calc loss and backprop gradients
+        loss = -mll(output, Y)
+        loss.backward()
+        # print('Iter %d/%d - Loss: %.3f' % (i + 1, training_iter, loss.item()))
+        optimizer.step()
 
     model.eval()
     likelihood.eval()
@@ -308,6 +332,7 @@ class MPPIController:
 data_buffer = pd.DataFrame(columns=['zone temperature', 
                                     'Site Outdoor Air Drybulb Temperature(Environment)',
                                     'Site Outdoor Air Relative Humidity(Environment)',
+                                    
                                     'Site Wind Speed(Environment)',
                                     'Site Total Solar Radiation Rate per Area(Environment)',
                                     'Zone People Occupant Count(SPACE1-1)',
@@ -381,7 +406,7 @@ while not done:
 
         # turn reward into a pandas dataframe and save it to a csv file
         reward_df = pd.DataFrame(rewards, columns=['comfort reward', 'energy reward'])
-        reward_df.to_csv('zimages/reward_plus_fb_e=.csv')
+        reward_df.to_csv('zimages/reward_plus_we0.01.csv')
         print('reward saved!')
     
     if current_timestep == 2001:

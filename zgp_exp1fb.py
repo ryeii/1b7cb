@@ -124,9 +124,6 @@ def dynamics(model, standardization, x, u, t):
     - mu (float): the mean of the Gaussian Process prediction
     - var (float): the variance of the Gaussian Process prediction
     '''
-    # u is a float from 0 to 1, so we need to convert it to an int from 0 to 9
-    for i in range(len(u)):
-        u[i] = int(u[i] * 9)
 
     # convert x and u to standardized form
     x = (x - standardization['zone temperature']['mean']) / standardization['zone temperature']['std']
@@ -275,6 +272,30 @@ def fit(data_buffer):
     model.covar_module.outputscale = 0.652
     model.likelihood.noise = 0.010
 
+    model.train()
+    likelihood.train()
+
+    # Use the adam optimizer
+    optimizer = torch.optim.Adam([
+        {'params': model.parameters()},  # Includes GaussianLikelihood parameters
+    ], lr=0.1)
+
+    # "Loss" for GPs - the marginal log likelihood
+    mll = gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model)
+
+    training_iter = 10
+
+    for i in range(training_iter):
+        # Zero gradients from previous iteration
+        optimizer.zero_grad()
+        # Output from model
+        output = model(X)
+        # Calc loss and backprop gradients
+        loss = -mll(output, Y)
+        loss.backward()
+        # print('Iter %d/%d - Loss: %.3f' % (i + 1, training_iter, loss.item()))
+        optimizer.step()
+
     model.eval()
     likelihood.eval()
 
@@ -291,7 +312,7 @@ class MPPIController:
         self.lambda_ = lambda_
         self.sigma = sigma
         
-    def control(self, x0, t):
+    def control(self, x0, t0):
         """
         Compute the MPPI control signal given the current state and time.
 
@@ -315,9 +336,9 @@ class MPPIController:
         U = np.zeros((self.horizon,)) # control signal
         U_noise = np.zeros((self.num_samples, self.horizon)) # noise added to U
 
-        # populate U with random signals from 0 to 1
+        # populate U with random integers between 18 and 26
         for j in range(self.horizon):
-            U[j] = np.random.uniform(0, 1)
+            U[j] = np.random.randint(18, 26)
 
         x = np.copy(x0)
         x = np.array([x for i in range(self.num_samples)])
@@ -325,13 +346,13 @@ class MPPIController:
             s = np.random.normal(0, self.sigma, (self.num_samples,)) # sample noise
             U_noise[:, t] = s
             u = s + U[t] # get a vector of control signals by adding noise vector to initial U
-            x, var = self.dynamics_fn(model, standardization, x, u, self.time_offset + t) # pass t so it can call env_reader to get weather
+            x, var = self.dynamics_fn(model, standardization, x, u, t0 + t) # pass t so it can call env_reader to get weather
             S[:, t] = x
             V[:, t] = var
         
         for i in range(self.num_samples):
             for j in range(self.horizon):
-                C[i] += self.cost_fn(S[i, j], V[i, j], U[j], self.time_offset + j)
+                C[i] += self.cost_fn(S[i, j], V[i, j], U[j], t0 + j)
         
         # for i in range(self.num_samples):
         #     x = np.copy(x0)
@@ -366,12 +387,14 @@ class MPPIController:
         '''
         epsilon = 0.1
         x = np.copy(x0)
-        var_sum = 0
+        vars = []
         for j in range(self.horizon):
-            x, var = self.dynamics_fn(model, standardization, x, U[j], self.time_offset + t)
-            var_sum += var
-        print('var sum: ', var_sum)
-        if var_sum > epsilon:
+            x, var = self.dynamics_fn(model, standardization, [x], [U[j]], t0 + t)
+            # vars.append(get_confidence_value(var[0]))
+            vars.append(var[0])
+            x = x[0]
+        print('action sequence: ', U , 'vars: ', vars, 'vars_sum: ', sum(vars), 'data buffer length: ', len(self.data_buffer), 'timestep: ', t0)
+        if sum(vars) > epsilon:
             # return False
             u = False
 
@@ -435,9 +458,11 @@ rule_agent = MyRuleBasedController(env)
 while not done:
 
     a = mppi.control(obs['Zone Air Temperature(SPACE1-1)'], current_timestep)
+    a = (a, a)
 
-    if a == False:
+    if a == (False, False):
         a = rule_agent.act(obs)
+        a = (a[0], a[0])
 
     obs, reward, done, info = env.step(a)
     comfort_reward, energy_reward = reward_(obs)
@@ -450,7 +475,7 @@ while not done:
                                         'Site Wind Speed(Environment)': obs['Site Wind Speed(Environment)'],
                                         'Site Total Solar Radiation Rate per Area(Environment)': obs['Site Diffuse Solar Radiation Rate per Area(Environment)']+obs['Site Direct Solar Radiation Rate per Area(Environment)'],
                                         'Zone People Occupant Count(SPACE1-1)': obs['Zone People Occupant Count(SPACE1-1)'],
-                                        'control signal': a}, index=[0])], ignore_index=True)
+                                        'control signal': a[0]}, index=[0])], ignore_index=True) # since summer, only the cooling setpoint is used
     
     mppi.update_data_buffer(data_buffer)
 
