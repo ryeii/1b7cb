@@ -96,19 +96,21 @@ agent = MyRuleBasedController(env)
 
 for i in range(1):
     obs = env.reset()
-    rewards = []
+    data = []
     done = False
     current_month = 0
 while not done:
     action = agent.act(obs)
     obs, reward, done, info = env.step(action)
     comfort_reward, energy_reward = reward_(obs)
-    rewards.append([comfort_reward, energy_reward])
+    indoor_temp = obs['Zone Air Temperature(SPACE1-1)']
+    action = (obs['Zone Thermostat Cooling Setpoint Temperature(SPACE1-1)'])
+    data.append([comfort_reward, energy_reward, indoor_temp, action])
 
 env.close()
 
 import pandas as pd
 
-# make rewards a pandas dataframe and save to csv
-rewards = pd.DataFrame(rewards, columns=['comfort', 'energy'])
-rewards.to_csv('zimages/rewards_rulebased.csv')
+# make data a pandas dataframe and save to csv
+data = pd.DataFrame(data, columns=['comfort_reward', 'energy_reward', 'indoor_temp', 'action'])
+data.to_csv('zimages/data_rule_based.csv', index=False)

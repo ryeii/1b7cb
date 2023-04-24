@@ -1,5 +1,7 @@
 import numpy as np
 import pandas as pd
+from datetime import datetime
+import json
 
 '''
 Convention:
@@ -14,10 +16,71 @@ Convention:
 - t (int): the current time
 '''
 
-
 COMFORT_RANGE = (23, 26)
 WEATHER = pd.read_csv('weather_pittsburg_Jun1Sept1.csv')
 LAMBDA_CONFIDENCE = 1.0
+
+from typing import List, Any, Sequence
+from sinergym.utils.common import get_season_comfort_range
+import sinergym
+from sinergym.utils.controllers import RBC5Zone
+
+
+class MyRuleBasedController(RBC5Zone):
+
+    def act(self, observation: List[Any]) -> Sequence[Any]:
+        """Select action based on outdoor air drybulb temperature and daytime.
+
+        Args:
+            observation (List[Any]): Perceived observation.
+
+        Returns:
+            Sequence[Any]: Action chosen.
+        """
+        obs_dict = observation
+
+        out_temp = obs_dict['Site Outdoor Air Drybulb Temperature(Environment)']
+
+        day = int(obs_dict['day'])
+        month = int(obs_dict['month'])
+        hour = int(obs_dict['hour'])
+        year = int(obs_dict['year'])
+
+        summer_start_date = datetime(year, 6, 1)
+        summer_final_date = datetime(year, 9, 30)
+
+        current_dt = datetime(year, month, day)
+
+        # Get season comfort range
+        if current_dt >= summer_start_date and current_dt <= summer_final_date:
+            season_comfort_range = self.setpoints_summer
+        else:
+            season_comfort_range = self.setpoints_summer
+        season_comfort_range = get_season_comfort_range(1991,month, day)
+        # Update setpoints
+        in_temp = obs_dict['Zone Air Temperature(SPACE1-1)']
+
+        current_heat_setpoint = obs_dict[
+            'Zone Thermostat Heating Setpoint Temperature(SPACE1-1)']
+        current_cool_setpoint = obs_dict[
+            'Zone Thermostat Cooling Setpoint Temperature(SPACE1-1)']
+
+        new_heat_setpoint = current_heat_setpoint
+        new_cool_setpoint = current_cool_setpoint
+
+        if in_temp < season_comfort_range[0]:
+            new_heat_setpoint = current_heat_setpoint + 1
+            new_cool_setpoint = current_cool_setpoint + 1
+        elif in_temp > season_comfort_range[1]:
+            new_cool_setpoint = current_cool_setpoint - 1
+            new_heat_setpoint = current_heat_setpoint - 1
+
+        action = (new_heat_setpoint, new_cool_setpoint)
+        if current_dt.weekday() > 5 or hour in range(22, 6):
+            #weekend or night
+            action = (18.33, 23.33)
+
+        return action
 
 
 def env_reader(timestep):
@@ -52,16 +115,14 @@ def dynamics(model, standardization, x, u, t):
     Predict the next zone temperature given the current state, control signal, and time.
 
     Args:
-    - x (float): zone state (zone temperature), shape (state_dim,)
-    - u (float): the control signal, shape (control_dim,)
+    - x (ndarray): a vector of zone states (zone temperature), shape (state_dim,)
+    - u (ndarray): a vector of perturbated control signals, shape (control_dim,)
     - t (float): the current time
 
     Returns:
     - mu (float): the mean of the Gaussian Process prediction
     - var (float): the variance of the Gaussian Process prediction
     '''
-    # u is a float from 0 to 1, so we need to convert it to an int from 0 to 9
-    u = int(u * 9)
 
     # convert x and u to standardized form
     x = (x - standardization['zone temperature']['mean']) / standardization['zone temperature']['std']
@@ -88,23 +149,29 @@ def dynamics(model, standardization, x, u, t):
     # replace nan in env_state with 0
     env_state = np.nan_to_num(env_state)
 
-    x = [x, env_state[0], env_state[1], env_state[2], env_state[3], env_state[4], u]
-    x = np.array(x)
+    # make an array of x with shape (len(x), 7)
+    x_array = np.zeros((len(x), 7))
+
+    # replace each row in x_array with [x, env_state[0], env_state[1], env_state[2], env_state[3], env_state[4], u]. This is the input to the GP model.
+    for i in range(len(x)):
+        x_array[i] = [x[i], env_state[0], env_state[1], env_state[2], env_state[3], env_state[4], u[i]]
+
+    x = x_array
 
     # tensorize x
     x = torch.tensor(x, dtype=torch.float32)
 
     # reshape x so it has size 7 in dimension 0
-    x = x.reshape(1, 7)
+    x = x.reshape(len(x), 7)
 
     pred = model(x)
 
     mu = pred.mean
     var = pred.variance
 
-    # convert mu and var from tensor to numpy float
-    mu = mu.detach().numpy().item()
-    var = var.detach().numpy().item()
+    # convert mu and var from tensor to numpy arrays
+    mu = mu.detach().numpy()
+    var = var.detach().numpy()
 
     # convert mu back to original form
     mu = mu * standardization['zone temperature']['std'] + standardization['zone temperature']['mean']
@@ -129,9 +196,9 @@ def cost(x, var, u, t):
     weight_energy = 1
 
     if env_state[4] > 0:
-        weight_energy = 0.1
+        weight_energy = 0.001
 
-    comfort_cost = -(1 - weight_energy) * (abs(x - comfort_range[0]) + abs(x - comfort_range[1]))
+    comfort_cost = (1 - weight_energy) * (abs(x - comfort_range[0]) + abs(x - comfort_range[1]))
     energy_cost = weight_energy * (u - x)**2
 
     confidence = get_confidence_value(var)
@@ -204,6 +271,30 @@ def fit(data_buffer):
     model.covar_module.outputscale = 0.652
     model.likelihood.noise = 0.010
 
+    model.train()
+    likelihood.train()
+
+    # Use the adam optimizer
+    optimizer = torch.optim.Adam([
+        {'params': model.parameters()},  # Includes GaussianLikelihood parameters
+    ], lr=0.1)
+
+    # "Loss" for GPs - the marginal log likelihood
+    mll = gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model)
+
+    training_iter = 10
+
+    for i in range(training_iter):
+        # Zero gradients from previous iteration
+        optimizer.zero_grad()
+        # Output from model
+        output = model(X)
+        # Calc loss and backprop gradients
+        loss = -mll(output, Y)
+        loss.backward()
+        # print('Iter %d/%d - Loss: %.3f' % (i + 1, training_iter, loss.item()))
+        optimizer.step()
+
     model.eval()
     likelihood.eval()
 
@@ -220,7 +311,7 @@ class MPPIController:
         self.lambda_ = lambda_
         self.sigma = sigma
         
-    def control(self, x0, t):
+    def control(self, x0, t0):
         """
         Compute the MPPI control signal given the current state and time.
 
@@ -232,29 +323,47 @@ class MPPIController:
         - u (numpy array): the control signal, shape (control_dim,)
         """
         # if the length of the data buffer is larger than 2, fit a Gaussian Process model to the data buffer
+
         if len(self.data_buffer) > 2:
-            model, likelihood, standardization = fit(self.data_buffer)
+                model, likelihood, standardization = fit(self.data_buffer)
         else:
-            return np.random.randint(0, 10) # return random int from 0 to 9
+            return False
 
         S = np.zeros((self.num_samples, self.horizon)) # sample trajectories
+        V = np.zeros((self.num_samples, self.horizon)) # confidence trajectories
         C = np.zeros((self.num_samples,)) # trajectory costs
         U = np.zeros((self.horizon,)) # control signal
         U_noise = np.zeros((self.num_samples, self.horizon)) # noise added to U
 
-        # populate U with random signals from 0 to 1
+        # populate U with random integers
         for j in range(self.horizon):
-            U[j] = np.random.uniform(0, 1)
+            U[j] = np.random.randint(24, 26)
+
+        x = np.copy(x0)
+        x = np.array([x for i in range(self.num_samples)])
+        for t in range(self.horizon):
+            s = np.random.normal(0, self.sigma, (self.num_samples,)) # sample noise
+            U_noise[:, t] = s
+            u = s + U[t] # get a vector of control signals by adding noise vector to initial U
+            x, var = self.dynamics_fn(model, standardization, x, u, t0 + t) # pass t so it can call env_reader to get weather
+            S[:, t] = x
+            V[:, t] = var
         
         for i in range(self.num_samples):
-            x = np.copy(x0)
-            s = np.random.normal(0, self.sigma, (self.horizon,)) # sample noise
-            U_noise[i] = s
             for j in range(self.horizon):
-                u = U[j] + s[j]
-                x, var = self.dynamics_fn(model, standardization, x, u, self.time_offset + t) # pass t so it can call env_reader to get weather
-                S[i, j] = x
-                C[i] += self.cost_fn(x, var, u, self.time_offset + t) # occupancy is obtained from the env state read from weather file, so we don't need to pass t
+                C[i] += self.cost_fn(S[i, j], V[i, j], U[j], t0 + j)
+        
+        # for i in range(self.num_samples):
+        #     x = np.copy(x0)
+        #     s = np.random.normal(0, self.sigma, (self.horizon,)) # sample noise
+        #     U_noise[i] = s
+        #     for j in range(self.horizon):
+        #         u = U[j] + s[j]
+
+        #         x, var = self.dynamics_fn(model, standardization, x, u, self.time_offset + t) # pass t so it can call env_reader to get weather
+
+        #         S[i, j] = x
+        #         C[i] += self.cost_fn(x, var, u, self.time_offset + t) # occupancy is obtained from the env state read from weather file, so we don't need to pass t
         
         # downscale C by 1000 to avoid float underflow
         C /= 10000
@@ -267,9 +376,26 @@ class MPPIController:
             U[j] += np.sum(expC * U_noise[:, j])
 
         u = U[0]
-        # u is a float from 0 to 1, so we need to convert it to an int from 0 to 9
-        u = int(u * 9)
-        
+
+        # '''
+        # Fall back mechanism.
+        # Using the dynamics function to evaluate the actions (u) chosen by MPPI and record the sum of the variances.
+        # If the sum of the variances is larger than epsilon, then call rule-based controller and return the control signal.
+        # '''
+        # epsilon = 200
+        # x = np.copy(x0)
+        # vars = []
+        # for j in range(self.horizon):
+        #     x, var = self.dynamics_fn(model, standardization, [x], [U[j]], t0 + t)
+        #     # vars.append(get_confidence_value(var[0]))
+        #     vars.append(var[0])
+        #     x = x[0]
+        # # print('action sequence: ', U , 'vars: ', vars, 'vars_sum: ', sum(vars), 'data buffer length: ', len(self.data_buffer), 'timestep: ', t0)
+        # if sum(vars) > epsilon:
+        #     # return False
+        #     u = False
+        # # print('u: ', u)
+
         return u
     
     def update_data_buffer(self, data_buffer):
@@ -290,7 +416,20 @@ data_buffer = pd.DataFrame(columns=['zone temperature',
 import gym
 import sinergym
 from sinergym.utils.wrappers import LoggerWrapper
-import datetime
+
+def reward_(obs):
+    comfort_range = COMFORT_RANGE
+    weight_energy = 1
+
+    if obs['Zone People Occupant Count(SPACE1-1)'] > 0:
+        weight_energy = 0.1
+    
+    x = obs['Zone Air Temperature(SPACE1-1)']
+
+    comfort_cost = (1 - weight_energy) * (abs(x - comfort_range[0]) + abs(x - comfort_range[1]))
+    energy_cost = weight_energy * obs['Facility Total HVAC Electricity Demand Rate(Whole Building)'] / 100
+
+    return - comfort_cost, - energy_cost
 
 extra_conf={
     'timesteps_per_hour':4, 
@@ -304,18 +443,30 @@ env = gym.make('Eplus-demo-v1',
                config_params=extra_conf,)
 
 obs = env.reset()
-rewards = []
+data = []
 done = False
 current_timestep = 0
-mppi = MPPIController(num_samples=100, horizon=4, time_offset=0, dynamics_fn=dynamics, cost_fn=cost, data_buffer=data_buffer, lambda_=1.0, sigma=0.2)
+mppi = MPPIController(num_samples=100, horizon=4, time_offset=0, dynamics_fn=dynamics, cost_fn=cost, data_buffer=data_buffer, lambda_=1.0, sigma=5)
 
-start_time = datetime.datetime.now()
+# start_time = datetime.datetime.now()
+
+# create rule-based controller
+rule_agent = MyRuleBasedController(env)
 
 while not done:
 
     a = mppi.control(obs['Zone Air Temperature(SPACE1-1)'], current_timestep)
+    a = (a, a)
+
+    if a == (False, False):
+        a = rule_agent.act(obs)
+        a = (a[0], a[0])
+
     obs, reward, done, info = env.step(a)
-    rewards.append(reward)
+    comfort_reward, energy_reward = reward_(obs)
+    indoor_temp = obs['Zone Air Temperature(SPACE1-1)']
+    action = (obs['Zone Thermostat Cooling Setpoint Temperature(SPACE1-1)'])
+    data.append([comfort_reward, energy_reward, indoor_temp, action])
 
     # add entry to data buffer using pd.concat
     data_buffer = pd.concat([data_buffer, pd.DataFrame({'zone temperature': obs['Zone Air Temperature(SPACE1-1)'],
@@ -324,28 +475,28 @@ while not done:
                                         'Site Wind Speed(Environment)': obs['Site Wind Speed(Environment)'],
                                         'Site Total Solar Radiation Rate per Area(Environment)': obs['Site Diffuse Solar Radiation Rate per Area(Environment)']+obs['Site Direct Solar Radiation Rate per Area(Environment)'],
                                         'Zone People Occupant Count(SPACE1-1)': obs['Zone People Occupant Count(SPACE1-1)'],
-                                        'control signal': a}, index=[0])], ignore_index=True)
+                                        'control signal': a[0]}, index=[0])], ignore_index=True) # since summer, only the cooling setpoint is used
     
     mppi.update_data_buffer(data_buffer)
 
     current_timestep += 1
 
     if current_timestep % 100 == 0:
-        checkpoint_time = datetime.datetime.now()
-        predicted_total_time = (checkpoint_time - start_time) / current_timestep * 4 * 24 * 92
-        predicted_remaining_time = predicted_total_time - (checkpoint_time - start_time)
-        predicted_remaining_time_minutes = predicted_remaining_time.seconds / 60
-        print('timestep: ', current_timestep, '. time elapsed: ', checkpoint_time - start_time, '. predicted remaining time: ', predicted_remaining_time_minutes, ' minutes')
+        # checkpoint_time = datetime.datetime.now()
+        # predicted_total_time = (checkpoint_time - start_time) / current_timestep * 4 * 24 * 92
+        # predicted_remaining_time = predicted_total_time - (checkpoint_time - start_time)
+        # predicted_remaining_time_minutes = predicted_remaining_time.seconds / 60
+        # print('timestep: ', current_timestep, '. time elapsed: ', checkpoint_time - start_time, '. predicted remaining time: ', predicted_remaining_time_minutes, ' minutes')
+        print('timestep: ', current_timestep)
+
+        # make data a pandas dataframe and save to csv
+        pd.DataFrame(data, columns=['comfort_reward', 'energy_reward', 'indoor_temp', 'action']).to_csv('zimages/data_gp_exp1.csv', index=False)
+        print('data saved!')
+    
+    if current_timestep == 2001:
+        done = True
 
 env.close()
-
-print(
-    'Episode ',
-    i,
-    'Mean reward: ',
-    np.mean(rewards),
-    'Cumulative reward: ',
-    sum(rewards))
 
 # plot the reward, x-axis is the timestep and y-axis is the reward
 import matplotlib.pyplot as plt
@@ -354,8 +505,4 @@ plt.plot(rewards)
 plt.xlabel('timestep')
 plt.ylabel('reward')
 plt.show()
-plt.savefig('zimages/reward.png')
-
-# turn reward into a pandas dataframe and save it to a csv file
-reward_df = pd.DataFrame(rewards, columns=['reward'])
-reward_df.to_csv('zimages/reward.csv')
+plt.savefig('zimages/reward_plus.png')

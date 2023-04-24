@@ -197,7 +197,7 @@ def cost(x, var, u, t):
     weight_energy = 1
 
     if env_state[4] > 0:
-        weight_energy = 0.1
+        weight_energy = 0.001
 
     comfort_cost = (1 - weight_energy) * (abs(x - comfort_range[0]) + abs(x - comfort_range[1]))
     energy_cost = weight_energy * (u - x)**2
@@ -338,7 +338,7 @@ class MPPIController:
 
         # populate U with random integers between 18 and 26
         for j in range(self.horizon):
-            U[j] = np.random.randint(18, 26)
+            U[j] = np.random.randint(23, 26)
 
         x = np.copy(x0)
         x = np.array([x for i in range(self.num_samples)])
@@ -377,15 +377,13 @@ class MPPIController:
             U[j] += np.sum(expC * U_noise[:, j])
 
         u = U[0]
-        # u is a float from 0 to 1, so we need to convert it to an int from 0 to 9
-        u = int(u * 9)
 
         '''
         Fall back mechanism.
         Using the dynamics function to evaluate the actions (u) chosen by MPPI and record the sum of the variances.
         If the sum of the variances is larger than epsilon, then call rule-based controller and return the control signal.
         '''
-        epsilon = 0.1
+        epsilon = 200
         x = np.copy(x0)
         vars = []
         for j in range(self.horizon):
@@ -393,10 +391,11 @@ class MPPIController:
             # vars.append(get_confidence_value(var[0]))
             vars.append(var[0])
             x = x[0]
-        print('action sequence: ', U , 'vars: ', vars, 'vars_sum: ', sum(vars), 'data buffer length: ', len(self.data_buffer), 'timestep: ', t0)
+        # print('action sequence: ', U , 'vars: ', vars, 'vars_sum: ', sum(vars), 'data buffer length: ', len(self.data_buffer), 'timestep: ', t0)
         if sum(vars) > epsilon:
             # return False
             u = False
+        # print('u: ', u)
 
         return u
     
@@ -448,7 +447,7 @@ obs = env.reset()
 rewards = []
 done = False
 current_timestep = 0
-mppi = MPPIController(num_samples=100, horizon=4, time_offset=0, dynamics_fn=dynamics, cost_fn=cost, data_buffer=data_buffer, lambda_=1.0, sigma=0.2)
+mppi = MPPIController(num_samples=100, horizon=4, time_offset=0, dynamics_fn=dynamics, cost_fn=cost, data_buffer=data_buffer, lambda_=1.0, sigma=5)
 
 # start_time = datetime.datetime.now()
 
@@ -467,6 +466,8 @@ while not done:
     obs, reward, done, info = env.step(a)
     comfort_reward, energy_reward = reward_(obs)
     rewards.append([comfort_reward, energy_reward])
+
+    print(a)
 
     # add entry to data buffer using pd.concat
     data_buffer = pd.concat([data_buffer, pd.DataFrame({'zone temperature': obs['Zone Air Temperature(SPACE1-1)'],
